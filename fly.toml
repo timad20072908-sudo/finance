@@ -1,27 +1,30 @@
-# Конфиг Fly.io. Имя приложения подставится при `fly launch`/`fly deploy`.
-app = "salary-allocation-planner"
-primary_region = "waw"  # Варшава — ближе всего к Киеву
+# fly.toml app configuration file generated for finance-hdmbtg on 2026-05-28T19:45:04Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'finance-hdmbtg'
+primary_region = 'ams'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "8080"
-  NODE_ENV = "production"
-  DB_PATH = "/data/app.db"
+  DB_PATH = '/data/app.db'
+  NODE_ENV = 'production'
+  PORT = '8080'
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
-# Постоянный диск под SQLite (данные переживают рестарты/деплои).
-[[mounts]]
-  source = "data"
-  destination = "/data"
-
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'

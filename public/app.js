@@ -34,7 +34,7 @@ const state = {
   view: 'dashboard',
   scenario: 'balanced',
   customInclude: [],
-  queue: { q: '', layer: '', type: '', band: '', sort: 'priority', compact: false },
+  queue: { q: '', layer: '', type: '', band: '', sortKey: 'priority', sortDir: 'desc', compact: false },
 };
 
 // ---------- helpers ----------
@@ -539,18 +539,44 @@ function filteredItems() {
   if (f.layer) arr = arr.filter((it) => (it.layer || it.bucket) === f.layer);
   if (f.type) arr = arr.filter((it) => it.type === f.type);
   if (f.band) arr = arr.filter((it) => it.band === f.band);
-  const cmp = {
-    priority: (a, b) => b.priority - a.priority || b.trajectory - a.trajectory,
-    cost_desc: (a, b) => b.cost - a.cost,
-    cost_asc: (a, b) => a.cost - b.cost,
-    deadline: (a, b) => (a.deadline ? new Date(a.deadline) : Infinity) - (b.deadline ? new Date(b.deadline) : Infinity),
-    trajectory: (a, b) => b.trajectory - a.trajectory,
-  }[f.sort] || ((a, b) => b.priority - a.priority);
-  return arr.sort(cmp);
+  const val = SORT_VAL[f.sortKey] || SORT_VAL.priority;
+  const dir = f.sortDir === 'asc' ? 1 : -1;
+  return arr.sort((a, b) => {
+    const va = val(a); const vb = val(b);
+    if (va < vb) return -dir;
+    if (va > vb) return dir;
+    return b.priority - a.priority;
+  });
+}
+
+// Извлечение значения для сортировки по ключу колонки.
+const SORT_VAL = {
+  title: (it) => it.title.toLowerCase(),
+  cost: (it) => it.cost,
+  layer: (it) => layerLabel(it.layer || it.bucket).toLowerCase(),
+  category: (it) => catLabelShort(it.category).toLowerCase(),
+  band: (it) => state.meta.bands.findIndex((b) => b.id === it.band),
+  type: (it) => ({ must: 0, should: 1, nice: 2 }[it.type] ?? 3),
+  priority: (it) => it.priority,
+  trajectory: (it) => it.trajectory,
+  deadline: (it) => (it.deadline ? new Date(it.deadline).getTime() : Infinity),
+};
+// Направление по умолчанию при первом клике на колонку.
+const SORT_DEFAULT_DIR = {
+  title: 'asc', cost: 'desc', layer: 'asc', category: 'asc',
+  band: 'desc', type: 'asc', priority: 'desc', trajectory: 'desc', deadline: 'asc',
+};
+
+// Заголовок-колонка с сортировкой по клику (стрелка показывает направление).
+function sortableTh(key, label, f) {
+  const active = f.sortKey === key;
+  const arrow = active ? (f.sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  return `<th class="sortable${active ? ' sorted' : ''}" data-sort="${key}" title="Сортировать по «${label}»">${label}${arrow}</th>`;
 }
 
 function viewQueue() {
   const f = state.queue;
+  const sortVal = `${f.sortKey}:${f.sortDir}`;
   const items = filteredItems();
   const opt = (val, label, sel) => `<option value="${val}" ${sel === val ? 'selected' : ''}>${label}</option>`;
   const layerOpts = ['<option value="">Все слои</option>']
@@ -617,12 +643,18 @@ function viewQueue() {
     <select id="qLayer">${layerOpts}</select>
     <select id="qType">${['<option value="">Все типы</option>', opt('must', 'Must', f.type), opt('should', 'Should', f.type), opt('nice', 'Nice', f.type)].join('')}</select>
     <select id="qBand">${bandOpts}</select>
-    <select id="qSort">${[opt('priority', 'Приоритет', f.sort), opt('cost_desc', 'Дороже', f.sort), opt('cost_asc', 'Дешевле', f.sort), opt('deadline', 'Дедлайн', f.sort), opt('trajectory', 'Долгосрочность', f.sort)].join('')}</select>
+    <select id="qSort" class="mobile-only">${[
+      opt('priority:desc', 'Сортировка: приоритет', sortVal), opt('cost:desc', 'Дороже', sortVal),
+      opt('cost:asc', 'Дешевле', sortVal), opt('deadline:asc', 'Дедлайн', sortVal),
+      opt('trajectory:desc', 'Долгосрочность', sortVal), opt('title:asc', 'По названию', sortVal)].join('')}</select>
   </div>
 
   ${state.items.length ? (items.length ? `
     <div class="table-wrap desktop-only"><table>
-      <thead><tr><th>Желание</th><th>Стоимость</th><th>Слой</th><th>Категория</th><th>Band</th><th>Тип</th><th>Приоритет</th><th>Дедлайн</th><th>Статус</th><th></th></tr></thead>
+      <thead><tr>${[
+        ['title', 'Желание'], ['cost', 'Стоимость'], ['layer', 'Слой'], ['category', 'Категория'],
+        ['band', 'Band'], ['type', 'Тип'], ['priority', 'Приоритет'], ['deadline', 'Дедлайн'],
+      ].map(([k, label]) => sortableTh(k, label, f)).join('')}<th>Статус</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="swipe-list mobile-only">${cards}<p class="swipe-hint muted small">Свайп влево — куплено · вправо — удалить</p></div>`
     : '<div class="empty"><div class="big">🔍</div><p>Ничего не найдено по фильтрам.</p></div>')
@@ -960,7 +992,32 @@ function bindQueueControls() {
       el.addEventListener('change', () => { state.queue[key] = el.value; rerenderQueue(); });
     }
   };
-  bind('#qLayer', 'layer'); bind('#qType', 'type'); bind('#qBand', 'band'); bind('#qSort', 'sort');
+  bind('#qLayer', 'layer'); bind('#qType', 'type'); bind('#qBand', 'band');
+  // мобильный выбор сортировки: значение вида "key:dir"
+  const sortSel = $('#qSort');
+  if (sortSel && !sortSel._bound) {
+    sortSel._bound = true;
+    sortSel.addEventListener('change', () => {
+      const [key, dir] = sortSel.value.split(':');
+      state.queue.sortKey = key; state.queue.sortDir = dir || 'desc';
+      rerenderQueue();
+    });
+  }
+  // сортировка по клику на заголовок колонки (ПК)
+  $$('th.sortable').forEach((th) => {
+    if (th._bound) return; th._bound = true;
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (state.queue.sortKey === key) {
+        state.queue.sortDir = state.queue.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.queue.sortKey = key;
+        state.queue.sortDir = SORT_DEFAULT_DIR[key] || 'desc';
+      }
+      rerenderQueue();
+    });
+  });
 }
 // Перерисовать только очередь, не теряя фокус всего приложения.
 function rerenderQueue() {

@@ -474,6 +474,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   background: var(--panel); color: var(--text); font-size: 13.5px;
 }
 
+/* ===== Сортировка по клику на заголовок ===== */
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--accent); }
+th.sortable.sorted { color: var(--accent); }
+
 /* ===== Сравнение сценариев ===== */
 .cmp-table th, .cmp-table td { text-align: center; white-space: nowrap; }
 .cmp-table tbody th { text-align: left; color: var(--muted); font-weight: 500; }

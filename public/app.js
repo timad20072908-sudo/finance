@@ -30,9 +30,11 @@ const state = {
   allocation: null,
   scenarios: [],
   history: [],
+  goals: [],
   view: 'dashboard',
   scenario: 'balanced',
   customInclude: [],
+  queue: { q: '', layer: '', type: '', band: '', sort: 'priority', compact: false },
 };
 
 // ---------- helpers ----------
@@ -264,6 +266,29 @@ $('#authForm').addEventListener('submit', async (e) => {
 
 $('#logoutBtn')?.addEventListener('click', doLogout);
 $('#logoutBtnMobile')?.addEventListener('click', doLogout);
+$('#fab')?.addEventListener('click', () => openQuickAddModal());
+$('#settingsBtn')?.addEventListener('click', openSettingsModal);
+
+// ---------- PWA: service worker + install prompt ----------
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('SW:', e));
+  });
+}
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  $('#installBtn')?.classList.remove('hidden');
+});
+$('#installBtn')?.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice.catch(() => {});
+  deferredPrompt = null;
+  $('#installBtn')?.classList.add('hidden');
+});
+window.addEventListener('appinstalled', () => { $('#installBtn')?.classList.add('hidden'); });
 
 // ============================================================
 // LOAD + RENDER
@@ -276,6 +301,7 @@ async function loadAndRender() {
   state.allocation = data.allocation;
   state.scenarios = data.scenarios;
   state.history = data.history;
+  state.goals = data.goals || [];
   try { state.customInclude = (await api.get('/api/custom-scenario')).includeIds || []; } catch {}
   $('#app').classList.remove('hidden');
   renderTopbar();
@@ -289,6 +315,7 @@ async function refresh() {
   state.allocation = data.allocation;
   state.scenarios = data.scenarios;
   state.history = data.history;
+  state.goals = data.goals || [];
   renderTopbar();
   renderView();
 }
@@ -330,7 +357,14 @@ function renderView() {
   else if (v === 'scenarios') root.innerHTML = viewScenarios();
   else if (v === 'history') root.innerHTML = viewHistory();
   else if (v === 'assistant') { root.innerHTML = viewAssistant(); initAssistant(); }
+  // плавное появление вкладки
+  root.classList.remove('view-enter');
+  void root.offsetWidth;
+  root.classList.add('view-enter');
   bindViewEvents();
+  // FAB прячем там, где он не нужен (он открывает добавление желания)
+  const fab = $('#fab');
+  if (fab) fab.classList.toggle('hidden', !state.plan && v !== 'queue');
   requestAnimationFrame(drawCharts);
 }
 
@@ -346,6 +380,73 @@ function noPlanBlock() {
     <button class="btn btn-primary" data-act="open-plan">Настроить зарплату</button></div>`;
 }
 
+// Скоро дедлайны — напоминание в Кабинете.
+function upcomingDeadlines(days = 30) {
+  const now = new Date();
+  return state.items
+    .filter((i) => i.deadline && i.status === 'active')
+    .map((i) => ({ item: i, left: Math.ceil((new Date(i.deadline) - now) / 86400000) }))
+    .filter((x) => x.left <= days)
+    .sort((a, b) => a.left - b.left);
+}
+function remindersBlock() {
+  const up = upcomingDeadlines(30);
+  if (!up.length) return '';
+  const items = up.slice(0, 4).map((x) => {
+    const overdue = x.left < 0;
+    const lbl = overdue ? `просрочено на ${-x.left} дн.` : x.left === 0 ? 'сегодня' : `через ${x.left} дн.`;
+    return `<span class="rem-pill ${overdue ? 'rem-over' : ''}">${escapeHtml(x.item.title)} · ${lbl}</span>`;
+  }).join('');
+  return `<div class="reminders"><span class="rem-ico">⏰</span><div class="rem-list"><b>Скоро дедлайны:</b> ${items}</div></div>`;
+}
+
+// What-if: ползунок зарплаты с мгновенным пересчётом.
+function whatIfBlock() {
+  const base = state.plan.salary;
+  const min = Math.max(0, Math.round((base * 0.6) / 500) * 500);
+  const max = Math.round((base * 1.4) / 500) * 500;
+  const aiCard = state.meta?.ai?.enabled
+    ? `<div class="card pad-lg tip-card">
+         <div class="row-between"><div class="stat-label">✦ Совет от AI</div>
+           <button class="btn btn-sm btn-outline" data-act="ai-tip">Обновить</button></div>
+         <div id="aiTip" class="tip-body muted">Нажмите «Обновить», чтобы получить совет по вашему плану.</div>
+       </div>`
+    : '';
+  return `
+  <div class="chart-cols" style="margin-top:16px">
+    <div class="card pad-lg">
+      <div class="row-between"><div class="stat-label">Что если зарплата изменится?</div>
+        <span id="whatifVal" class="stat-value sm accent-num">${fmt(base)}</span></div>
+      <input id="whatifSlider" type="range" min="${min}" max="${max}" step="500" value="${base}" style="width:100%;margin-top:12px;accent-color:var(--accent)">
+      <div class="row-between small muted"><span>${fmtShort(min)}</span><span>${fmtShort(max)}</span></div>
+      <div id="whatifOut" class="whatif-out"></div>
+      <button class="btn btn-sm btn-primary hidden" id="whatifApply" data-act="whatif-apply" style="margin-top:10px">Применить как новую зарплату</button>
+    </div>
+    ${aiCard}
+  </div>`;
+}
+
+function goalsBlock() {
+  const goals = state.goals || [];
+  const rows = goals.map((g) => {
+    const pct = g.target > 0 ? Math.min(100, Math.round((g.saved / g.target) * 100)) : 0;
+    const done = pct >= 100;
+    return `<div class="goal" data-goal="${g.id}">
+      <div class="goal-top"><div class="goal-name">${escapeHtml(g.title)}${done ? ' <span class="verdict verdict-keep">готово</span>' : ''}</div>
+        <div class="goal-actions">
+          <button class="btn btn-sm btn-ghost" data-act="goal-add" data-id="${g.id}">+ внести</button>
+          <button class="btn btn-sm btn-ghost" data-act="goal-del" data-id="${g.id}" title="Удалить">✕</button>
+        </div></div>
+      <div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div>
+      <div class="row-between small muted"><span>${fmt(g.saved)} из ${fmt(g.target)}</span><span>${pct}%${g.deadline ? ' · до ' + fmtDate(g.deadline) : ''}</span></div>
+    </div>`;
+  }).join('');
+  return `
+  <div class="section-title row-between"><span>Цели-накопления · ${goals.length}</span>
+    <button class="btn btn-sm btn-outline" data-act="goal-add-new">+ Цель</button></div>
+  ${goals.length ? `<div class="goals">${rows}</div>` : '<p class="muted">Целей пока нет. Добавьте первую — например, «Подушка 10 000 грн».</p>'}`;
+}
+
 function viewDashboard() {
   if (!state.plan || !state.allocation) {
     return `<div class="view-head"><h1>Кабинет</h1><p>Обзор будущей зарплаты до её прихода.</p></div>${noPlanBlock()}`;
@@ -359,6 +460,7 @@ function viewDashboard() {
 
   return `
   <div class="view-head"><h1>Кабинет</h1><p>Как разложить зарплату заранее — до того, как деньги пришли.</p></div>
+  ${remindersBlock()}
   <div class="grid cards">
     <div class="card"><div class="stat-label">Зарплата</div><div class="stat-value">${fmt(t.salary)}</div><div class="stat-sub">${fmtDate(state.plan.payday)}</div></div>
     <div class="card"><div class="stat-label">Обязательные расходы</div><div class="stat-value sm">${fmt(t.survival)}</div><div class="stat-sub">списываются первыми</div></div>
@@ -393,6 +495,9 @@ function viewDashboard() {
     </div>
   </div>
 
+  ${whatIfBlock()}
+  ${goalsBlock()}
+
   <div class="section-title">Одобрено в этой зарплате · ${state.allocation.approved.length}</div>
   ${state.allocation.approved.length ? state.allocation.approved.map((a) => queueItemRow(a.item, `Остаток после: ${fmt(a.balanceAfter)}`)).join('') : '<p class="muted">Пока ничего не одобрено — добавьте желания в очередь.</p>'}
 
@@ -421,8 +526,39 @@ function queueItemRow(item, extra = '', reason = '') {
   </div>`;
 }
 
+// Применить поиск/фильтры/сортировку к списку желаний.
+function filteredItems() {
+  const f = state.queue;
+  let arr = state.items.slice();
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    arr = arr.filter((it) => it.title.toLowerCase().includes(q)
+      || catLabelShort(it.category).toLowerCase().includes(q)
+      || layerLabel(it.layer || it.bucket).toLowerCase().includes(q));
+  }
+  if (f.layer) arr = arr.filter((it) => (it.layer || it.bucket) === f.layer);
+  if (f.type) arr = arr.filter((it) => it.type === f.type);
+  if (f.band) arr = arr.filter((it) => it.band === f.band);
+  const cmp = {
+    priority: (a, b) => b.priority - a.priority || b.trajectory - a.trajectory,
+    cost_desc: (a, b) => b.cost - a.cost,
+    cost_asc: (a, b) => a.cost - b.cost,
+    deadline: (a, b) => (a.deadline ? new Date(a.deadline) : Infinity) - (b.deadline ? new Date(b.deadline) : Infinity),
+    trajectory: (a, b) => b.trajectory - a.trajectory,
+  }[f.sort] || ((a, b) => b.priority - a.priority);
+  return arr.sort(cmp);
+}
+
 function viewQueue() {
-  const rows = state.items.map((it) => {
+  const f = state.queue;
+  const items = filteredItems();
+  const opt = (val, label, sel) => `<option value="${val}" ${sel === val ? 'selected' : ''}>${label}</option>`;
+  const layerOpts = ['<option value="">Все слои</option>']
+    .concat(Object.entries(state.meta.layers).map(([k, v]) => opt(k, v.ru, f.layer))).join('');
+  const bandOpts = ['<option value="">Все размеры</option>']
+    .concat(state.meta.bands.map((b) => opt(b.id, b.ru || b.label, f.band))).join('');
+
+  const rows = items.map((it) => {
     const inPlan = state.allocation?.approved.some((a) => a.item.id === it.id);
     const layer = it.layer || it.bucket;
     return `<tr data-id="${it.id}">
@@ -435,24 +571,64 @@ function viewQueue() {
       <td>${prioDots(it.priority)}</td>
       <td>${it.deadline ? fmtDate(it.deadline) : '—'}</td>
       <td>${inPlan ? '<span class="green-num">в плане</span>' : '<span class="muted">позже</span>'}</td>
-      <td style="text-align:right">
+      <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-sm btn-ghost" data-act="tradeoff" data-id="${it.id}">Trade-off</button>
+        ${state.meta?.ai?.enabled ? `<button class="btn btn-sm btn-ghost" data-act="explain" data-id="${it.id}" title="Почему AI советует так?">✦</button>` : ''}
         <button class="btn btn-sm btn-outline" data-act="edit" data-id="${it.id}">✎</button>
         <button class="btn btn-sm btn-ghost" data-act="bought" data-id="${it.id}" title="Отметить купленным">✓</button>
       </td>
     </tr>`;
   }).join('');
 
+  // мобильные карточки со свайпом
+  const cards = items.map((it) => {
+    const inPlan = state.allocation?.approved.some((a) => a.item.id === it.id);
+    const layer = it.layer || it.bucket;
+    return `<div class="swipe-wrap" data-id="${it.id}">
+      <div class="swipe-bg">
+        <span class="swipe-left">✓ куплено</span>
+        <span class="swipe-right">🗑 удалить</span>
+      </div>
+      <div class="swipe-card" data-id="${it.id}">
+        <div class="qi-main">
+          <div class="qi-title"><span class="dot" style="background:${layerColor(layer)}"></span>${escapeHtml(it.title)}
+            <span class="tag tag-${it.type}">${TYPE_LABELS[it.type]}</span>${verdictChip(it)}</div>
+          <div class="qi-meta">${layerLabel(layer)} · ${bandLabel(it.band)} · приоритет ${it.priority}/5${it.deadline ? ' · ' + fmtDate(it.deadline) : ''} ${inPlan ? '· <span class="green-num">в плане</span>' : ''}</div>
+        </div>
+        <div class="qi-cost">${fmt(it.cost)}<button class="btn btn-sm btn-outline" data-act="edit" data-id="${it.id}" style="margin-top:6px">✎</button></div>
+      </div>
+    </div>`;
+  }).join('');
+
   return `
   <div class="view-head row-between">
-    <div><h1>Очередь желаний</h1><p>Единый список желаний — переносится из месяца в месяц. Купленное архивируется.</p></div>
+    <div><h1>Очередь желаний</h1><p>Единый список — переносится из месяца в месяц. Купленное архивируется.</p></div>
     <button class="btn btn-primary" data-act="add-item">+ Добавить желание</button>
   </div>
-  ${state.items.length ? `<div class="table-wrap"><table>
-    <thead><tr><th>Желание</th><th>Стоимость</th><th>Слой</th><th>Категория</th><th>Band</th><th>Тип</th><th>Приоритет</th><th>Дедлайн</th><th>Статус</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`
+
+  <form class="quick-add" id="quickAddInline" autocomplete="off">
+    <input name="title" placeholder="Быстро добавить: название" required />
+    <input name="cost" type="number" min="0" placeholder="грн" />
+    <button class="btn btn-primary" type="submit">+ Добавить</button>
+  </form>
+
+  <div class="queue-toolbar">
+    <input id="qSearch" class="q-search" placeholder="🔍 Поиск по названию / категории" value="${escapeAttr(f.q)}" />
+    <select id="qLayer">${layerOpts}</select>
+    <select id="qType">${['<option value="">Все типы</option>', opt('must', 'Must', f.type), opt('should', 'Should', f.type), opt('nice', 'Nice', f.type)].join('')}</select>
+    <select id="qBand">${bandOpts}</select>
+    <select id="qSort">${[opt('priority', 'Приоритет', f.sort), opt('cost_desc', 'Дороже', f.sort), opt('cost_asc', 'Дешевле', f.sort), opt('deadline', 'Дедлайн', f.sort), opt('trajectory', 'Долгосрочность', f.sort)].join('')}</select>
+  </div>
+
+  ${state.items.length ? (items.length ? `
+    <div class="table-wrap desktop-only"><table>
+      <thead><tr><th>Желание</th><th>Стоимость</th><th>Слой</th><th>Категория</th><th>Band</th><th>Тип</th><th>Приоритет</th><th>Дедлайн</th><th>Статус</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="swipe-list mobile-only">${cards}<p class="swipe-hint muted small">Свайп влево — куплено · вправо — удалить</p></div>`
+    : '<div class="empty"><div class="big">🔍</div><p>Ничего не найдено по фильтрам.</p></div>')
     : `<div class="empty"><div class="big">≡</div><p>Очередь пуста. Добавьте первое желание.</p>
        <button class="btn btn-primary" data-act="add-item">+ Добавить желание</button></div>`}
+  <div id="explainBox"></div>
   <div id="tradeoffBox"></div>`;
 }
 
@@ -525,7 +701,32 @@ function viewScenarios() {
   return `
   <div class="view-head"><h1>Сценарии месяца</h1><p>Сравните стратегии распределения и выберите ту, что выглядит сбалансированной. Выбранный сценарий применяется ко всем экранам.</p></div>
   <div class="grid scn-grid">${cards}</div>
+  ${scenarioCompare()}
   ${state.scenario === 'custom' ? customScenarioEditor() : ''}`;
+}
+
+// Сравнение сценариев бок о бок (на ПК — колонки, на телефоне — горизонтальный скролл).
+function scenarioCompare() {
+  const sc = state.scenarios;
+  if (sc.length < 2) return '';
+  const row = (label, fn, cls = '') => `<tr><th>${label}</th>${sc.map((s) => `<td class="${cls}">${fn(s)}</td>`).join('')}</tr>`;
+  return `
+  <div class="section-title">Сравнение бок о бок</div>
+  <div class="table-wrap"><table class="cmp-table">
+    <thead><tr><th></th>${sc.map((s) => `<th class="${s.key === state.scenario ? 'cmp-active' : ''}">
+        <button class="btn btn-sm ${s.key === state.scenario ? 'btn-primary' : 'btn-outline'}" data-act="pick-scenario" data-key="${s.key}">${s.label}</button>
+      </th>`).join('')}</tr></thead>
+    <tbody>
+      ${row('Статус', (s) => `<span class="status-badge status-${s.status}">${STATUS_LABELS[s.status]}</span>`)}
+      ${row('Карьера', (s) => fmt(s.career))}
+      ${row('Качество жизни', (s) => fmt(s.quality))}
+      ${row('Буфер', (s) => fmt(s.buffer))}
+      ${row('Распределено', (s) => fmt(s.allocated))}
+      ${row('Останется', (s) => `<b class="${s.remaining < 0 ? 'red-num' : 'green-num'}">${fmt(s.remaining)}</b>`)}
+      ${row('Одобрено', (s) => `${s.includedCount}`)}
+      ${row('Отложено', (s) => `${s.excludedCount}`)}
+    </tbody>
+  </table></div>`;
 }
 
 function customScenarioEditor() {
@@ -594,14 +795,42 @@ async function sendChat(e) {
   input.value = '';
   chatHistory.push({ role: 'user', content: text });
   const log = $('#chatLog');
-  log.innerHTML += `<div class="msg user">${escapeHtml(text)}</div><div class="msg bot" id="pending">…</div>`;
+  log.innerHTML += `<div class="msg user">${escapeHtml(text)}</div><div class="msg bot typing" id="pending"><span class="dots"><i></i><i></i><i></i></span></div>`;
   log.scrollTop = log.scrollHeight;
+  const pending = $('#pending');
+  let acc = '';
   try {
-    const out = await api.post('/api/ai/chat', { messages: chatHistory });
-    chatHistory.push({ role: 'assistant', content: out.reply });
-    $('#pending').outerHTML = `<div class="msg bot">${escapeHtml(out.reply)}</div>`;
+    const res = await fetch('/api/ai/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory, scenario: state.scenario }),
+    });
+    if (res.status === 401) { showAuthGate(); return; }
+    if (!res.ok || !res.body) throw new Error('stream ' + res.status);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    pending.classList.remove('typing');
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      acc += decoder.decode(value, { stream: true });
+      pending.textContent = acc;
+      log.scrollTop = log.scrollHeight;
+    }
+    chatHistory.push({ role: 'assistant', content: acc });
+    pending.removeAttribute('id');
   } catch (ex) {
-    $('#pending').outerHTML = `<div class="msg bot">Ошибка ассистента: ${escapeHtml(ex.message)}</div>`;
+    // Фолбэк на обычный (нестриминговый) запрос.
+    try {
+      const out = await api.post('/api/ai/chat', { messages: chatHistory, scenario: state.scenario });
+      chatHistory.push({ role: 'assistant', content: out.reply });
+      pending.classList.remove('typing');
+      pending.textContent = out.reply;
+      pending.removeAttribute('id');
+    } catch (ex2) {
+      pending.classList.remove('typing');
+      pending.textContent = 'Ошибка ассистента: ' + ex2.message;
+    }
   }
   $('#chatLog').scrollTop = $('#chatLog').scrollHeight;
 }
@@ -617,20 +846,194 @@ function bindViewEvents() {
       const id = Number(el.dataset.id);
       if (act === 'open-plan') openPlanModal();
       else if (act === 'add-item') openItemModal();
+      else if (act === 'quick-add') openQuickAddModal();
       else if (act === 'edit') openItemModal(state.items.find((i) => i.id === id));
       else if (act === 'bought') await markBought(id);
+      else if (act === 'defer') await deferItem(id);
+      else if (act === 'delete-item') await deleteItem(id);
       else if (act === 'tradeoff') await showTradeoff(id);
+      else if (act === 'explain') await explainItem(id, el);
       else if (act === 'close-month') closeMonth();
       else if (act === 'pick-scenario') pickScenario(el.dataset.key);
+      else if (act === 'ai-tip') await loadAiTip();
+      else if (act === 'whatif-apply') await applyWhatIf();
+      else if (act === 'goal-add-new') openGoalModal();
+      else if (act === 'goal-add') openGoalContribute(id);
+      else if (act === 'goal-del') await deleteGoal(id);
+      else if (act === 'open-settings') openSettingsModal();
     });
   });
   $$('[data-cust]').forEach((cb) => cb.addEventListener('change', saveCustomScenario));
+
+  // What-if слайдер (живой пересчёт).
+  const slider = $('#whatifSlider');
+  if (slider && !slider._bound) {
+    slider._bound = true;
+    slider.addEventListener('input', () => runWhatIf(Number(slider.value)));
+  }
+
+  // Поиск/фильтры/сортировка в очереди.
+  bindQueueControls();
+  // Свайпы по карточкам на мобильном.
+  bindSwipe();
+}
+
+// ---------- what-if ----------
+let _whatifT;
+function runWhatIf(salary) {
+  $('#whatifVal').textContent = fmt(salary);
+  const applyBtn = $('#whatifApply');
+  applyBtn?.classList.toggle('hidden', salary === state.plan.salary);
+  clearTimeout(_whatifT);
+  _whatifT = setTimeout(async () => {
+    try {
+      const { allocation } = await api.get(`/api/whatif?scenario=${state.scenario}&salary=${salary}`);
+      if (!allocation) return;
+      const t = allocation.totals;
+      const out = $('#whatifOut');
+      if (!out) return;
+      const delta = t.salary - state.plan.salary;
+      out.innerHTML = `
+        <div class="whatif-grid">
+          <div><span class="muted small">Доступно</span><b>${fmt(t.availableToAllocate)}</b></div>
+          <div><span class="muted small">Распределено</span><b>${fmt(t.allocated)}</b></div>
+          <div><span class="muted small">Одобрено</span><b>${allocation.approved.length} / ${allocation.approved.length + allocation.deferred.length}</b></div>
+          <div><span class="muted small">Останется</span><b class="${t.remaining < 0 ? 'red-num' : 'green-num'}">${fmt(t.remaining)}</b></div>
+        </div>
+        <div class="small muted" style="margin-top:6px">${delta === 0 ? 'Текущая зарплата' : delta > 0 ? `+${fmt(delta)} к текущей` : `${fmt(delta)} к текущей`} · статус: ${STATUS_LABELS[t.status]}</div>`;
+    } catch (e) { console.warn(e); }
+  }, 180);
+}
+async function applyWhatIf() {
+  const salary = Number($('#whatifSlider').value);
+  await api.post('/api/plan', {
+    name: state.plan.name, payday: state.plan.payday, salary,
+    survivalCost: state.plan.survivalCost, buffer: state.plan.buffer,
+  });
+  toast('Зарплата обновлена');
+  await refresh();
+}
+
+// ---------- AI tip ----------
+async function loadAiTip() {
+  const box = $('#aiTip');
+  if (!box) return;
+  box.textContent = 'Думаю…';
+  box.classList.add('muted');
+  try {
+    const out = await api.post('/api/ai/tip', { scenario: state.scenario });
+    box.classList.remove('muted');
+    box.textContent = out.reply || '—';
+  } catch (e) {
+    box.textContent = 'Не удалось получить совет: ' + e.message;
+  }
+}
+
+// ---------- queue search/filter/sort + quick add inline ----------
+function bindQueueControls() {
+  const qa = $('#quickAddInline');
+  if (qa && !qa._bound) {
+    qa._bound = true;
+    qa.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(qa);
+      const title = String(f.get('title') || '').trim();
+      if (!title) return;
+      await api.post('/api/items', { title, cost: +f.get('cost') || 0, type: 'should' });
+      toast('Добавлено в очередь');
+      await refresh();
+    });
+  }
+  const search = $('#qSearch');
+  if (search && !search._bound) {
+    search._bound = true;
+    let t;
+    search.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => { state.queue.q = search.value; rerenderQueue(); }, 160);
+    });
+  }
+  const bind = (sel, key) => {
+    const el = $(sel);
+    if (el && !el._bound) {
+      el._bound = true;
+      el.addEventListener('change', () => { state.queue[key] = el.value; rerenderQueue(); });
+    }
+  };
+  bind('#qLayer', 'layer'); bind('#qType', 'type'); bind('#qBand', 'band'); bind('#qSort', 'sort');
+}
+// Перерисовать только очередь, не теряя фокус всего приложения.
+function rerenderQueue() {
+  if (state.view !== 'queue') return;
+  const root = $('#views');
+  root.innerHTML = viewQueue();
+  bindViewEvents();
+}
+
+// ---------- swipe gestures (mobile wishlist) ----------
+function bindSwipe() {
+  $$('.swipe-card').forEach((card) => {
+    if (card._swipe) return; card._swipe = true;
+    const wrap = card.closest('.swipe-wrap');
+    const id = Number(wrap.dataset.id);
+    let startX = 0; let dx = 0; let dragging = false;
+    card.addEventListener('touchstart', (e) => {
+      startX = e.touches[0].clientX; dx = 0; dragging = true;
+      card.style.transition = 'none';
+    }, { passive: true });
+    card.addEventListener('touchmove', (e) => {
+      if (!dragging) return;
+      dx = e.touches[0].clientX - startX;
+      card.style.transform = `translateX(${dx}px)`;
+      wrap.classList.toggle('reveal-left', dx > 24);
+      wrap.classList.toggle('reveal-right', dx < -24);
+    }, { passive: true });
+    card.addEventListener('touchend', async () => {
+      dragging = false;
+      card.style.transition = 'transform .2s ease';
+      const TH = 90;
+      if (dx > TH) { card.style.transform = 'translateX(100%)'; await markBought(id); }
+      else if (dx < -TH) { card.style.transform = 'translateX(-100%)'; await deleteItem(id); }
+      else { card.style.transform = 'translateX(0)'; wrap.classList.remove('reveal-left', 'reveal-right'); }
+    });
+  });
 }
 
 async function markBought(id) {
   await api.post(`/api/items/${id}/status`, { status: 'bought' });
   toast('Отмечено как купленное');
   await refresh();
+}
+
+// Отложить: исключить из текущего распределения через canDefer + понизить приоритет не нужно;
+// проще — убираем из custom include и помечаем как «можно отложить». Здесь делаем мягкий перенос:
+// исключаем из плана, понижая приоритет до 1, чтобы движок поставил его в конец.
+async function deferItem(id) {
+  const it = state.items.find((i) => i.id === id);
+  if (!it) return;
+  await api.put(`/api/items/${id}`, { ...it, priority: 1, canDefer: true });
+  toast('Перенесено на потом');
+  await refresh();
+}
+
+async function deleteItem(id) {
+  const it = state.items.find((i) => i.id === id);
+  if (!confirm(`Удалить «${it ? it.title : 'желание'}» навсегда?`)) return;
+  await api.del(`/api/items/${id}`);
+  toast('Удалено');
+  await refresh();
+}
+
+async function explainItem(id, el) {
+  const box = $('#explainBox') || $('#tradeoffBox');
+  if (box) { box.innerHTML = '<div class="tradeoff">✦ AI думает…</div>'; }
+  try {
+    const out = await api.post('/api/ai/explain', { id, scenario: state.scenario });
+    if (box) box.innerHTML = `<div class="tradeoff"><b>✦ AI:</b> ${escapeHtml(out.reply || '—')}</div>`;
+  } catch (e) {
+    if (box) box.innerHTML = `<div class="tradeoff">Не удалось получить объяснение: ${escapeHtml(e.message)}</div>`;
+  }
+  box?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 async function showTradeoff(id) {
@@ -703,6 +1106,131 @@ function openPlanModal() {
     });
     closeModal(); toast('Зарплата сохранена'); await refresh();
   });
+}
+
+// Быстрое добавление желания (одна строка).
+function openQuickAddModal() {
+  openModal(`<div class="modal modal-sheet">
+    <div class="modal-head"><h2>Быстро добавить</h2><button class="close-x" onclick="document.getElementById('modalRoot').innerHTML=''">×</button></div>
+    <form id="quickForm" class="form-grid">
+      <div class="field full"><label>Что хочешь?</label><input name="title" placeholder="Например, «Беспроводные наушники»" required autofocus /></div>
+      <div class="field"><label>Стоимость, грн</label><input type="number" name="cost" min="0" placeholder="0" /></div>
+      <div class="field"><label>Важность</label><select name="type">
+        <option value="must">Обязательно</option><option value="should" selected>Желательно</option><option value="nice">По желанию</option>
+      </select></div>
+      <div class="modal-foot field full" style="flex-direction:row">
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('modalRoot').innerHTML=''">Отмена</button>
+        <button type="submit" class="btn btn-primary">Добавить</button>
+      </div>
+    </form></div>`);
+  $('#quickForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    await api.post('/api/items', { title: String(f.get('title')).trim(), cost: +f.get('cost') || 0, type: f.get('type') });
+    closeModal(); toast('Добавлено в очередь'); await refresh();
+  });
+}
+
+// ---------- goals ----------
+function openGoalModal() {
+  openModal(`<div class="modal modal-sheet">
+    <div class="modal-head"><h2>Новая цель-накопление</h2><button class="close-x" onclick="document.getElementById('modalRoot').innerHTML=''">×</button></div>
+    <form id="goalForm" class="form-grid">
+      <div class="field full"><label>Название</label><input name="title" placeholder="Например, «Подушка безопасности»" required autofocus /></div>
+      <div class="field"><label>Цель, грн</label><input type="number" name="target" min="0" value="10000" /></div>
+      <div class="field"><label>Уже отложено, грн</label><input type="number" name="saved" min="0" value="0" /></div>
+      <div class="field full"><label>Дедлайн (необязательно)</label><input type="date" name="deadline" /></div>
+      <div class="modal-foot field full" style="flex-direction:row">
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('modalRoot').innerHTML=''">Отмена</button>
+        <button type="submit" class="btn btn-primary">Создать</button>
+      </div>
+    </form></div>`);
+  $('#goalForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    await api.post('/api/goals', {
+      title: f.get('title'), target: +f.get('target') || 0, saved: +f.get('saved') || 0, deadline: f.get('deadline') || null,
+    });
+    closeModal(); toast('Цель создана'); await refresh();
+  });
+}
+
+function openGoalContribute(id) {
+  const g = state.goals.find((x) => x.id === id);
+  if (!g) return;
+  openModal(`<div class="modal modal-sheet">
+    <div class="modal-head"><h2>Внести в «${escapeHtml(g.title)}»</h2><button class="close-x" onclick="document.getElementById('modalRoot').innerHTML=''">×</button></div>
+    <form id="contribForm" class="form-grid">
+      <div class="field full"><label>Сколько добавить, грн</label><input type="number" name="amount" min="0" value="500" autofocus /></div>
+      <div class="muted small">Сейчас: ${fmt(g.saved)} из ${fmt(g.target)}</div>
+      <div class="modal-foot field full" style="flex-direction:row">
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('modalRoot').innerHTML=''">Отмена</button>
+        <button type="submit" class="btn btn-primary">Внести</button>
+      </div>
+    </form></div>`);
+  $('#contribForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const amount = +new FormData(e.currentTarget).get('amount') || 0;
+    await api.put(`/api/goals/${id}`, { saved: (g.saved || 0) + amount });
+    closeModal(); toast('Зачислено'); await refresh();
+  });
+}
+
+async function deleteGoal(id) {
+  const g = state.goals.find((x) => x.id === id);
+  if (!confirm(`Удалить цель «${g ? g.title : ''}»?`)) return;
+  await api.del(`/api/goals/${id}`);
+  toast('Цель удалена'); await refresh();
+}
+
+// ---------- settings: export / import ----------
+function openSettingsModal() {
+  openModal(`<div class="modal modal-sheet">
+    <div class="modal-head"><h2>Данные и резервная копия</h2><button class="close-x" onclick="document.getElementById('modalRoot').innerHTML=''">×</button></div>
+    <div class="form-grid">
+      <div class="field full"><label>Экспорт</label>
+        <p class="muted small">Скачать всё (план, желания, цели, история) в JSON-файл.</p>
+        <button class="btn btn-outline" id="exportBtn" type="button">⤓ Скачать бэкап (JSON)</button></div>
+      <div class="field full"><label>Импорт</label>
+        <p class="muted small">Восстановить из ранее скачанного файла. Желания добавятся к текущим.</p>
+        <input type="file" id="importFile" accept="application/json,.json" />
+        <div id="importMsg" class="muted small"></div></div>
+      <div class="modal-foot field full" style="flex-direction:row">
+        <button type="button" class="btn btn-primary" onclick="document.getElementById('modalRoot').innerHTML=''">Готово</button>
+      </div>
+    </div></div>`);
+  $('#exportBtn').addEventListener('click', exportData);
+  $('#importFile').addEventListener('change', importData);
+}
+
+async function exportData() {
+  try {
+    const res = await fetch('/api/export');
+    if (!res.ok) throw new Error('export ' + res.status);
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `capital-queue-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('Бэкап скачан');
+  } catch (e) { toast('Ошибка экспорта: ' + e.message); }
+}
+
+async function importData(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const msg = $('#importMsg');
+  try {
+    const data = JSON.parse(await file.text());
+    const out = await api.post('/api/import', { items: data.items, plan: data.plan, goals: data.goals });
+    if (msg) msg.textContent = `Импортировано желаний: ${out.importedItems}.`;
+    toast('Данные импортированы');
+    await refresh();
+  } catch (err) {
+    if (msg) msg.textContent = 'Не удалось прочитать файл: ' + err.message;
+  }
 }
 
 function clientBand(cost) {

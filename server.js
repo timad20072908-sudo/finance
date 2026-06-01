@@ -17,7 +17,7 @@ import {
 import {
   allocate, tradeoff, scenarioSummaries, SCENARIOS, scoreVerdict,
 } from './src/allocation.js';
-import { aiStatus, askAssistant } from './src/ai.js';
+import { aiStatus, askAssistant, askAssistantStream } from './src/ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -244,10 +244,109 @@ app.get('/api/allocation', requireAuth, (req, res) => {
   res.json({ plan, allocation });
 });
 
+// What-if: пересчёт распределения при изменённой зарплате (без сохранения в БД).
+app.get('/api/whatif', requireAuth, (req, res) => {
+  const plan = getActivePlan();
+  if (!plan) return res.json({ plan: null, allocation: null });
+  const scenario = req.query.scenario || 'balanced';
+  const salary = Math.max(0, Number(req.query.salary) || plan.salary);
+  const whatPlan = { ...plan, salary };
+  const allocation = allocate(whatPlan, getActiveItems(), {
+    scenario,
+    includeIds: scenario === 'custom' ? customIds() : null,
+  });
+  res.json({ plan: whatPlan, allocation });
+});
+
 app.get('/api/scenarios', requireAuth, (req, res) => {
   const plan = getActivePlan();
   if (!plan) return res.json({ scenarios: [] });
   res.json({ scenarios: scenarioSummaries(plan, getActiveItems(), customIds()) });
+});
+
+// ================= GOALS (savings goals, в settings JSON) =================
+function getGoals() { return getJSON('goals', []) || []; }
+function saveGoals(g) { setJSON('goals', g); }
+
+app.get('/api/goals', requireAuth, (req, res) => res.json({ goals: getGoals() }));
+
+app.post('/api/goals', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const goals = getGoals();
+  const goal = {
+    id: Date.now(),
+    title: String(b.title || 'Цель').trim() || 'Цель',
+    target: Math.max(0, Number(b.target) || 0),
+    saved: Math.max(0, Number(b.saved) || 0),
+    deadline: b.deadline || null,
+  };
+  goals.push(goal);
+  saveGoals(goals);
+  res.json({ goal, goals });
+});
+
+app.put('/api/goals/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const b = req.body || {};
+  const goals = getGoals();
+  const g = goals.find((x) => x.id === id);
+  if (!g) return res.status(404).json({ error: 'not_found' });
+  if (b.title !== undefined) g.title = String(b.title).trim() || g.title;
+  if (b.target !== undefined) g.target = Math.max(0, Number(b.target) || 0);
+  if (b.saved !== undefined) g.saved = Math.max(0, Number(b.saved) || 0);
+  if (b.deadline !== undefined) g.deadline = b.deadline || null;
+  saveGoals(goals);
+  res.json({ goal: g, goals });
+});
+
+app.delete('/api/goals/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  saveGoals(getGoals().filter((x) => x.id !== id));
+  res.json({ ok: true });
+});
+
+// ================= EXPORT / IMPORT (backup) =================
+app.get('/api/export', requireAuth, (req, res) => {
+  const data = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    plan: getActivePlan(),
+    items: stmt.allItems.all().map(rowToItem),
+    goals: getGoals(),
+    customInclude: customIds() || [],
+    history: stmt.closedPlans.all().map(rowToPlan),
+  };
+  res.setHeader('Content-Disposition', 'attachment; filename="capital-queue-backup.json"');
+  res.json(data);
+});
+
+app.post('/api/import', requireAuth, (req, res) => {
+  const b = req.body || {};
+  let importedItems = 0;
+  if (Array.isArray(b.items)) {
+    const tx = db.transaction(() => {
+      for (const it of b.items) {
+        stmt.insertItem.run(normalizeItemInput(it));
+        importedItems += 1;
+      }
+    });
+    tx();
+  }
+  if (b.plan && typeof b.plan === 'object') {
+    const p = b.plan;
+    const payload = {
+      name: String(p.name || 'Зарплата').trim() || 'Зарплата',
+      payday: p.payday || new Date().toISOString().slice(0, 10),
+      salary: Math.max(0, Number(p.salary) || 0),
+      survivalCost: Math.max(0, Number(p.survivalCost) || 0),
+      buffer: Math.max(0, Number(p.buffer) || 0),
+    };
+    const existing = getActivePlan();
+    if (existing) stmt.updatePlan.run({ ...payload, id: existing.id });
+    else stmt.insertPlan.run(payload);
+  }
+  if (Array.isArray(b.goals)) saveGoals(b.goals);
+  res.json({ ok: true, importedItems });
 });
 
 app.get('/api/custom-scenario', requireAuth, (req, res) => {
@@ -290,6 +389,7 @@ app.get('/api/state', requireAuth, (req, res) => {
     allocation,
     scenarios: plan ? scenarioSummaries(plan, items, customIds()) : [],
     history: stmt.closedPlans.all().map(rowToPlan),
+    goals: getGoals(),
     meta: metaPayload(),
   });
 });
@@ -297,23 +397,87 @@ app.get('/api/state', requireAuth, (req, res) => {
 // ================= AI =================
 app.get('/api/ai/status', requireAuth, (req, res) => res.json(aiStatus()));
 
+function buildAiContext(scenario = 'balanced') {
+  const plan = getActivePlan();
+  const items = getActiveItems();
+  const allocation = plan ? allocate(plan, items, {
+    scenario,
+    includeIds: scenario === 'custom' ? customIds() : null,
+  }) : null;
+  return {
+    plan,
+    allocation: allocation && {
+      totals: allocation.totals,
+      approved: allocation.approved.map((a) => ({ title: a.item.title, cost: a.item.cost })),
+      deferred: allocation.deferred.map((d) => ({ title: d.item.title, cost: d.item.cost, reason: d.reason })),
+    },
+    itemsCount: items.length,
+    goals: getGoals(),
+  };
+}
+
 app.post('/api/ai/chat', requireAuth, async (req, res) => {
   try {
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-    const plan = getActivePlan();
-    const items = getActiveItems();
-    const allocation = plan ? allocate(plan, items, { scenario: 'balanced' }) : null;
-    const context = {
-      plan,
-      allocation: allocation && {
-        totals: allocation.totals,
-        approved: allocation.approved.map((a) => ({ title: a.item.title, cost: a.item.cost })),
-        deferred: allocation.deferred.map((d) => ({ title: d.item.title, cost: d.item.cost, reason: d.reason })),
-      },
-      itemsCount: items.length,
-    };
-    const out = await askAssistant(messages, context);
+    const out = await askAssistant(messages, buildAiContext(req.body?.scenario));
     res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: 'ai_failed', detail: String(e.message || e) });
+  }
+});
+
+// Стриминг ответа ассистента: plain-text чанки по мере генерации.
+app.post('/api/ai/chat/stream', requireAuth, async (req, res) => {
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  try {
+    await askAssistantStream(messages, buildAiContext(req.body?.scenario), (chunk) => {
+      res.write(chunk);
+      if (typeof res.flush === 'function') res.flush();
+    });
+    res.end();
+  } catch (e) {
+    if (!res.headersSent) res.status(500);
+    res.write(`\n[Ошибка ассистента: ${String(e.message || e)}]`);
+    res.end();
+  }
+});
+
+// Короткий «совет месяца» для Кабинета.
+app.post('/api/ai/tip', requireAuth, async (req, res) => {
+  try {
+    const messages = [{
+      role: 'user',
+      content: 'Дай один короткий конкретный совет по моему плану на этот месяц — 1–2 предложения, без вступлений. Что сделать в первую очередь или на что обратить внимание.',
+    }];
+    const out = await askAssistant(messages, buildAiContext(req.body?.scenario));
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: 'ai_failed', detail: String(e.message || e) });
+  }
+});
+
+// Объяснение вердикта по конкретному желанию.
+app.post('/api/ai/explain', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.body?.id);
+    const item = stmt.itemById.get(id);
+    if (!item) return res.status(404).json({ error: 'not_found' });
+    const it = rowToItem(item);
+    const verdict = scoreVerdict(it);
+    const messages = [{
+      role: 'user',
+      content: [
+        `Объясни простыми словами, стоит ли мне сейчас покупать: «${it.title}» (${it.cost} грн).`,
+        `Категория: ${it.category}, слой: ${it.layer}, тип: ${it.type}, приоритет: ${it.priority}/5, долгосрочная ценность: ${it.trajectory}/5, эмоция: ${it.emotional}/5${it.deadline ? `, дедлайн: ${it.deadline}` : ''}.`,
+        verdict ? `Расчётный вердикт: ${verdict.verdict} (${verdict.score}/100).` : '',
+        'Дай 2–4 предложения: почему брать или отложить, и при каком условии решение меняется.',
+      ].filter(Boolean).join('\n'),
+    }];
+    const out = await askAssistant(messages, buildAiContext(req.body?.scenario));
+    res.json({ ...out, verdict });
   } catch (e) {
     res.status(500).json({ error: 'ai_failed', detail: String(e.message || e) });
   }

@@ -6,6 +6,13 @@
   <meta name="theme-color" content="#ffffff" />
   <title>Capital Queue — план зарплаты</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Capital Queue" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -115,6 +122,8 @@
             </a>
           </div>
           <span id="topStatus" class="status-badge">—</span>
+          <button id="installBtn" class="icon-btn hidden" title="Установить приложение" type="button">⤓</button>
+          <button id="settingsBtn" class="icon-btn" title="Данные и цели" type="button">⚙</button>
           <button id="themeBtn" class="icon-btn" title="Сменить тему" type="button">◐</button>
           <button id="editPlanBtn" class="btn btn-primary">Настроить</button>
         </div>
@@ -132,6 +141,8 @@
         <button class="nav-item" data-view="assistant"><span class="ico">✦</span><span class="lbl">AI</span></button>
         <button class="nav-item nav-action" id="logoutBtnMobile" type="button"><span class="ico">⏻</span><span class="lbl">Выйти</span></button>
       </nav>
+
+      <button id="fab" class="fab" type="button" title="Быстро добавить желание" aria-label="Добавить желание">+</button>
     </main>
   </div>
 

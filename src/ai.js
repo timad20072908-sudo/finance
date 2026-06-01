@@ -102,3 +102,65 @@ export async function askAssistant(messages, context) {
 
   return { enabled: true, reply };
 }
+
+// Стриминг ответа по токенам. onChunk(textPiece) вызывается по мере поступления.
+// Для Gemini используется streamGenerateContent (SSE). Для остальных — разбиваем
+// готовый ответ на части (псевдо-стрим), чтобы UI везде печатал «по словам».
+export async function askAssistantStream(messages, context, onChunk) {
+  if (!aiEnabled()) {
+    const text = 'AI-ассистент не настроен. Добавьте AI_PROVIDER и AI_API_KEY в окружении.';
+    onChunk(text);
+    return { enabled: false, reply: text };
+  }
+  const model = process.env.AI_MODEL || DEFAULT_MODELS[PROVIDER];
+  const system = buildSystemPrompt(context);
+
+  if (PROVIDER === 'gemini') {
+    const reply = await streamGemini(system, messages, model, onChunk);
+    return { enabled: true, reply };
+  }
+
+  // Fallback: получаем целиком и отдаём кусками.
+  const out = await askAssistant(messages, context);
+  const words = String(out.reply || '').split(/(\s+)/);
+  for (const w of words) { if (w) onChunk(w); }
+  return out;
+}
+
+async function streamGemini(system, messages, model, onChunk) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${API_KEY}`;
+  const contents = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents }),
+  });
+  if (!res.ok || !res.body) throw new Error(`Gemini ${res.status}: ${await res.text().catch(() => '')}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const json = t.slice(5).trim();
+      if (!json || json === '[DONE]') continue;
+      try {
+        const data = JSON.parse(json);
+        const piece = data.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+        if (piece) { full += piece; onChunk(piece); }
+      } catch { /* частичный JSON — пропускаем */ }
+    }
+  }
+  return full.trim();
+}

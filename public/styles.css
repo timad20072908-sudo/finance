@@ -388,6 +388,124 @@ tbody tr:last-child td { border-bottom: none; }
 /* ============================================================
    Адаптив под телефон
    ============================================================ */
+/* ===== Утилиты видимости ===== */
+.desktop-only { display: block; }
+
+/* ===== Плавное появление вкладки ===== */
+.view-enter { animation: viewIn .26s ease both; }
+@keyframes viewIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ===== Доступность: фокус-кольца (AA) ===== */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-enter, * { animation: none !important; transition: none !important; }
+}
+
+/* ===== Скелетоны загрузки ===== */
+.skeleton {
+  position: relative; overflow: hidden;
+  background: var(--panel-2); border-radius: 10px; min-height: 14px;
+}
+.skeleton::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+  transform: translateX(-100%); animation: shimmer 1.2s infinite;
+}
+@keyframes shimmer { to { transform: translateX(100%); } }
+
+/* ===== FAB (быстрое добавление) ===== */
+.fab {
+  display: none;
+  position: fixed; right: 18px; bottom: calc(82px + env(safe-area-inset-bottom));
+  width: 56px; height: 56px; border-radius: 50%; border: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff; font-size: 30px; line-height: 1; font-weight: 300;
+  box-shadow: 0 8px 24px rgba(47,107,255,.45); cursor: pointer; z-index: 25;
+}
+.fab:active { transform: scale(.94); }
+.fab.hidden { display: none !important; }
+
+/* ===== Напоминания о дедлайнах ===== */
+.reminders {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: rgba(245,177,61,.12); border: 1px solid rgba(245,177,61,.4);
+  border-radius: 12px; padding: 11px 14px; margin-bottom: 16px;
+}
+.reminders .rem-ico { font-size: 18px; }
+.rem-list { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; }
+.rem-pill { background: var(--panel); border: 1px solid var(--border-soft); border-radius: 20px; padding: 2px 10px; font-size: 12px; }
+.rem-pill.rem-over { border-color: var(--red); color: var(--red); }
+
+/* ===== What-if ===== */
+.whatif-out { margin-top: 12px; }
+.whatif-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.whatif-grid > div { display: flex; flex-direction: column; }
+.whatif-grid b { font-size: 16px; }
+.tip-card .tip-body { margin-top: 10px; font-size: 14px; line-height: 1.5; }
+
+/* ===== Цели ===== */
+.goals { display: grid; gap: 12px; }
+.goal { background: var(--panel); border: 1px solid var(--border-soft); border-radius: 14px; padding: 14px 16px; }
+.goal-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.goal-name { font-weight: 600; }
+.goal-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+.goal-bar { height: 9px; background: var(--panel-2); border-radius: 6px; overflow: hidden; margin: 9px 0 6px; }
+.goal-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-deep)); border-radius: 6px; transition: width .5s ease; }
+
+/* ===== Quick-add (inline) ===== */
+.quick-add { display: flex; gap: 8px; margin-bottom: 14px; }
+.quick-add input[name="title"] { flex: 1; }
+.quick-add input { padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text); font-size: 14px; }
+.quick-add input[name="cost"] { width: 90px; }
+
+/* ===== Очередь: тулбар поиска/фильтров ===== */
+.queue-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.queue-toolbar .q-search { flex: 1; min-width: 180px; }
+.queue-toolbar input, .queue-toolbar select {
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); color: var(--text); font-size: 13.5px;
+}
+
+/* ===== Сравнение сценариев ===== */
+.cmp-table th, .cmp-table td { text-align: center; white-space: nowrap; }
+.cmp-table tbody th { text-align: left; color: var(--muted); font-weight: 500; }
+.cmp-table th.cmp-active { background: rgba(47,107,255,.08); }
+
+/* ===== Свайп-карточки (мобильный список желаний) ===== */
+.swipe-list { display: none; }
+.swipe-wrap { position: relative; border-radius: 14px; overflow: hidden; margin-bottom: 10px; }
+.swipe-bg {
+  position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: center;
+  padding: 0 18px; font-weight: 700; font-size: 13px; color: #fff;
+}
+.swipe-bg .swipe-left { background: transparent; color: var(--green); }
+.swipe-bg .swipe-right { background: transparent; color: var(--red); }
+.swipe-wrap.reveal-left .swipe-bg { background: rgba(22,163,74,.18); }
+.swipe-wrap.reveal-right .swipe-bg { background: rgba(239,68,68,.18); }
+.swipe-card {
+  position: relative; display: flex; justify-content: space-between; gap: 12px;
+  background: var(--panel); border: 1px solid var(--border-soft); border-radius: 14px;
+  padding: 13px 15px; touch-action: pan-y; will-change: transform;
+}
+.swipe-card .qi-cost { display: flex; flex-direction: column; align-items: flex-end; font-weight: 700; }
+.swipe-hint { text-align: center; margin-top: 4px; }
+
+/* ===== Чат: индикатор «печатает» ===== */
+.msg.typing { display: inline-flex; align-items: center; }
+.dots { display: inline-flex; gap: 4px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite both; }
+.dots i:nth-child(2) { animation-delay: .2s; }
+.dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
 @media (max-width: 820px) {
   /* страница фиксируется по высоте экрана: вся страница не скроллится
      (нет iOS-«резинки»), скроллится только внутренний контент */
@@ -450,6 +568,17 @@ tbody tr:last-child td { border-bottom: none; }
   .bottom-nav .nav-item.active { background: transparent; color: var(--accent); }
   .bottom-nav .nav-item:hover { background: transparent; }
   .bottom-nav .nav-action { color: var(--red); }
+
+  /* мобильные переключения видимости */
+  .desktop-only { display: none !important; }
+  .fab:not(.hidden) { display: flex; align-items: center; justify-content: center; }
+  .swipe-list { display: block; }
+  .swipe-list.mobile-only { display: block; }
+  .quick-add { flex-wrap: wrap; }
+  .quick-add input[name="cost"] { width: 100%; }
+  .queue-toolbar .q-search { min-width: 100%; }
+  .queue-toolbar select { flex: 1; }
+  .whatif-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 380px) {
